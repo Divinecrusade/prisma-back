@@ -1,10 +1,16 @@
+"""
+API Views for UX Research Panel.
+
+Authentication:
+- Review pages: public (respects is_hidden flag)
+- Report pages: admin only
+- Admin panel (CRUD operations): admin only
+"""
 import uuid
 from rest_framework import viewsets, status
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import api_view, action
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from django.contrib.auth import authenticate
-from django.contrib.auth.models import User
+
 from .models import ResearchProject, ResearchImage, Annotation
 from .serializers import (
     ResearchProjectSerializer,
@@ -13,19 +19,104 @@ from .serializers import (
     AnnotationSerializer,
     AnnotationSubmitSerializer,
 )
+from .authentication import (
+    login_admin,
+    logout_admin,
+    get_current_user,
+    is_authenticated,
+    admin_required,
+)
 
+
+# =============================================================================
+# Authentication Views
+# =============================================================================
+
+@api_view(['POST'])
+def login(request):
+    """
+    Login endpoint for admin authentication.
+    Returns a token for valid credentials.
+    """
+    email = request.data.get('email')
+    password = request.data.get('password')
+
+    if not email or not password:
+        return Response({
+            'success': False,
+            'message': 'Email and password are required'
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    user, token = login_admin(email, password)
+    
+    if user and token:
+        return Response({
+            'success': True,
+            'message': 'Login successful',
+            'user': user,
+            'token': token,
+        })
+
+    return Response({
+        'success': False,
+        'message': 'Invalid credentials'
+    }, status=status.HTTP_401_UNAUTHORIZED)
+
+
+@api_view(['POST'])
+def logout(request):
+    """Logout endpoint - invalidates the token."""
+    from .authentication import get_token_from_request
+    token = get_token_from_request(request)
+    if token:
+        logout_admin(token)
+    return Response({
+        'success': True,
+        'message': 'Logged out successfully'
+    })
+
+
+@api_view(['GET'])
+def get_current_session(request):
+    """
+    Check current authentication status.
+    Returns user info if authenticated, or authenticated: false otherwise.
+    """
+    user = get_current_user(request)
+    if user:
+        return Response({
+            'authenticated': True,
+            'user': user
+        })
+    return Response({
+        'authenticated': False,
+        'user': None
+    })
+
+
+# =============================================================================
+# Project ViewSet (Admin operations require auth)
+# =============================================================================
 
 class ResearchProjectViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing research projects.
-    Provides CRUD operations and visibility toggle.
+    ViewSet for ResearchProject.
+    - list/retrieve: admin only (for admin panel)
+    - create/update/delete: admin only
     """
     queryset = ResearchProject.objects.all()
-
+    
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return ResearchProjectCreateSerializer
         return ResearchProjectSerializer
+    
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # All project operations require admin auth
+        if not is_authenticated(request):
+            from rest_framework.exceptions import AuthenticationFailed
+            raise AuthenticationFailed('Authentication required')
 
     @action(detail=True, methods=['patch'])
     def visibility(self, request, pk=None):
@@ -36,58 +127,89 @@ class ResearchProjectViewSet(viewsets.ModelViewSet):
         return Response({'is_hidden': project.is_hidden})
 
 
+# =============================================================================
+# Image ViewSet (Mixed access)
+# =============================================================================
+
 class ResearchImageViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing research images.
-    Supports filtering by project_id and visibility toggle.
+    ViewSet for ResearchImage.
+    - retrieve: public (for review page, respects is_hidden)
+    - list/create/update/delete: admin only
     """
     queryset = ResearchImage.objects.all()
     serializer_class = ResearchImageSerializer
-    parser_classes = [MultiPartParser, FormParser, JSONParser]
-
-    def get_queryset(self):
-        queryset = ResearchImage.objects.all()
-        project_id = self.request.query_params.get('project_id')
-        if project_id:
-            queryset = queryset.filter(project_id=project_id)
-        return queryset
+    
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # Allow public access to retrieve (for review page)
+        if self.action == 'retrieve':
+            return
+        # All other operations require admin auth
+        if not is_authenticated(request):
+            from rest_framework.exceptions import AuthenticationFailed
+            raise AuthenticationFailed('Authentication required')
+    
+    def retrieve(self, request, *args, **kwargs):
+        """
+        Public retrieve for review page.
+        Returns 404 if image is hidden or project is hidden.
+        """
+        instance = self.get_object()
+        
+        # Check if image or its project is hidden (unless admin)
+        if not is_authenticated(request):
+            if instance.is_hidden or instance.project.is_hidden:
+                return Response(
+                    {'error': 'Image not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['patch'])
     def visibility(self, request, pk=None):
-        """Toggle image visibility"""
+        """Toggle image visibility (admin only)"""
         image = self.get_object()
         image.is_hidden = not image.is_hidden
         image.save()
         return Response({'is_hidden': image.is_hidden})
 
 
+# =============================================================================
+# Annotation ViewSet (Mixed access)
+# =============================================================================
+
 class AnnotationViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing annotations.
-    Supports filtering by image_id.
+    ViewSet for Annotation.
+    - create: public (for review submissions)
+    - list/retrieve/update/delete: admin only
     """
     queryset = Annotation.objects.all()
     serializer_class = AnnotationSerializer
+    
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        # Allow public access to create (for review submissions)
+        if self.action == 'create':
+            return
+        # All other operations require admin auth
+        if not is_authenticated(request):
+            from rest_framework.exceptions import AuthenticationFailed
+            raise AuthenticationFailed('Authentication required')
 
-    def get_queryset(self):
-        queryset = Annotation.objects.all()
-        image_id = self.request.query_params.get('image_id')
-        if image_id:
-            queryset = queryset.filter(image_id=image_id)
-        return queryset
 
+# =============================================================================
+# Annotation Submission (Public)
+# =============================================================================
 
 @api_view(['POST'])
 def submit_annotations(request):
     """
-    Submit annotations from the review page.
-    Expects data in Annotorious format with the following structure:
-    {
-        "id": "image-uuid",
-        "image_href": "url",
-        "text_content": "description",
-        "annotations": [...]
-    }
+    Public endpoint for submitting annotations from review page.
+    Uses AnnotationSubmitSerializer to validate Annotorious format.
     """
     serializer = AnnotationSubmitSerializer(data=request.data)
     
@@ -100,12 +222,18 @@ def submit_annotations(request):
     image_id = serializer.validated_data['id']
     annotations_data = serializer.validated_data['annotations']
 
-    # Check if image exists
     try:
         image = ResearchImage.objects.get(id=image_id)
     except ResearchImage.DoesNotExist:
         return Response(
-            {'error': f'Image with id {image_id} not found'},
+            {'error': 'Image not found'},
+            status=status.HTTP_404_NOT_FOUND
+        )
+    
+    # Block submissions for hidden images/projects
+    if image.is_hidden or image.project.is_hidden:
+        return Response(
+            {'error': 'Image not found'},
             status=status.HTTP_404_NOT_FOUND
         )
 
@@ -120,13 +248,11 @@ def submit_annotations(request):
             geometry = selector.get('geometry', {})
             bounds = geometry.get('bounds', {})
 
-            # Validate bounds
             min_x = bounds.get('minX', 0)
             min_y = bounds.get('minY', 0)
             max_x = bounds.get('maxX', 0)
             max_y = bounds.get('maxY', 0)
 
-            # Ensure valid dimensions
             if min_x < 0 or min_y < 0 or max_x < min_x or max_y < min_y:
                 errors.append(f"Annotation {idx}: Invalid bounds")
                 continue
@@ -166,56 +292,16 @@ def submit_annotations(request):
     return Response(response_data, status=status_code)
 
 
-@api_view(['POST'])
-def login(request):
-    """
-    Simple login endpoint.
-    TODO: Implement proper authentication with JWT or session-based auth.
-    
-    For development purposes only. Replace with Django's auth system in production.
-    """
-    email = request.data.get('email')
-    password = request.data.get('password')
-
-    if not email or not password:
-        return Response({
-            'success': False,
-            'message': 'Email and password are required'
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    # TODO: Replace with proper authentication
-    # This is a placeholder for development only
-    # In production, use Django's authentication system with:
-    # - Proper user model
-    # - Password hashing
-    # - JWT tokens or session authentication
-    # - Rate limiting
-    
-    # Example with Django's auth (commented out for now):
-    # user = authenticate(username=email, password=password)
-    # if user is not None:
-    #     # Create session or JWT token
-    #     return Response({'success': True, 'user': {...}})
-    
-    # Temporary development credentials
-    if email == 'admin@example.com' and password == 'admin123':
-        return Response({
-            'success': True,
-            'message': 'Login successful',
-            'user': {'email': email}
-        })
-
-    return Response({
-        'success': False,
-        'message': 'Invalid credentials'
-    }, status=status.HTTP_401_UNAUTHORIZED)
-
+# =============================================================================
+# Report Data (Admin only)
+# =============================================================================
 
 @api_view(['GET'])
+@admin_required
 def get_report_data(request, image_id):
     """
     Get all annotations for an image, formatted for the report page.
-    Returns image details and all associated annotations.
+    Admin only - returns image details and all associated annotations.
     """
     try:
         image = ResearchImage.objects.get(id=image_id)
