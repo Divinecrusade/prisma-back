@@ -3,13 +3,26 @@ from .models import ResearchProject, ResearchImage, Annotation
 
 
 class AnnotationSerializer(serializers.ModelSerializer):
+    """Serializer for individual annotations"""
+    
     class Meta:
         model = Annotation
         fields = ['id', 'image', 'session_id', 'left', 'top', 'width', 'height', 'text', 'created_at']
         read_only_fields = ['id', 'created_at']
 
+    def validate(self, data):
+        """Validate annotation bounds"""
+        if data.get('left', 0) < 0 or data.get('top', 0) < 0:
+            raise serializers.ValidationError("Position values cannot be negative")
+        
+        if data.get('width', 0) <= 0 or data.get('height', 0) <= 0:
+            raise serializers.ValidationError("Width and height must be positive")
+        
+        return data
+
 
 class ResearchImageSerializer(serializers.ModelSerializer):
+    """Full serializer for research images with computed URL"""
     url = serializers.SerializerMethodField()
     review_count = serializers.ReadOnlyField()
 
@@ -42,6 +55,7 @@ class ResearchImageListSerializer(serializers.ModelSerializer):
 
 
 class ResearchProjectSerializer(serializers.ModelSerializer):
+    """Full serializer for research projects with nested images"""
     images = ResearchImageListSerializer(many=True, read_only=True)
 
     class Meta:
@@ -52,50 +66,75 @@ class ResearchProjectSerializer(serializers.ModelSerializer):
 
 class ResearchProjectCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating/updating projects (without nested images)"""
+    
     class Meta:
         model = ResearchProject
         fields = ['id', 'name', 'description', 'is_hidden']
         read_only_fields = ['id']
 
+    def validate_name(self, value):
+        """Ensure project name is not empty"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Project name cannot be empty")
+        return value.strip()
+
 
 class AnnotationSubmitSerializer(serializers.Serializer):
-    """Serializer for submitting a batch of annotations from review page"""
-    id = serializers.CharField()  # uniqueId from frontend
-    image_href = serializers.CharField()
-    text_content = serializers.CharField(allow_blank=True)
-    annotations = serializers.ListField(child=serializers.DictField())
+    """
+    Serializer for submitting a batch of annotations from review page.
+    Expects data in the following format:
+    {
+        "id": "image-uuid",
+        "image_href": "url-to-image",
+        "text_content": "optional description",
+        "annotations": [
+            {
+                "target": {...},
+                "body": [...]
+            },
+            ...
+        ]
+    }
+    """
+    id = serializers.CharField(help_text="Unique identifier for the image")
+    image_href = serializers.CharField(help_text="URL reference to the image")
+    text_content = serializers.CharField(
+        allow_blank=True,
+        required=False,
+        help_text="Optional text content or description"
+    )
+    annotations = serializers.ListField(
+        child=serializers.DictField(),
+        allow_empty=True,
+        help_text="List of annotations in Annotorious format"
+    )
+
+    def validate_id(self, value):
+        """Validate that the ID is a valid UUID"""
+        try:
+            import uuid
+            uuid.UUID(value)
+        except (ValueError, AttributeError):
+            raise serializers.ValidationError("Invalid UUID format for image ID")
+        return value
+
+    def validate_annotations(self, value):
+        """Validate that annotations have the required structure"""
+        for idx, annotation in enumerate(value):
+            if not isinstance(annotation, dict):
+                raise serializers.ValidationError(f"Annotation {idx} must be a dictionary")
+            
+            # Check for required keys
+            if 'target' not in annotation:
+                raise serializers.ValidationError(f"Annotation {idx} missing 'target' field")
+        
+        return value
 
     def create(self, validated_data):
-        image_id = validated_data['id']
-        session_id = validated_data.get('session_id', str(__import__('uuid').uuid4()))
-        annotations_data = validated_data['annotations']
-
-        created_annotations = []
-        for ann in annotations_data:
-            # Parse Annotorious format
-            target = ann.get('target', {})
-            selector = target.get('selector', {})
-            
-            # Get geometry from selector
-            geometry = selector.get('geometry', {})
-            bounds = geometry.get('bounds', {})
-            
-            # Get comment text from bodies
-            text = ''
-            for body in ann.get('body', []):
-                if body.get('purpose') == 'commenting':
-                    text = body.get('value', '')
-                    break
-
-            annotation = Annotation.objects.create(
-                image_id=image_id,
-                session_id=session_id,
-                left=bounds.get('minX', 0),
-                top=bounds.get('minY', 0),
-                width=bounds.get('maxX', 0) - bounds.get('minX', 0),
-                height=bounds.get('maxY', 0) - bounds.get('minY', 0),
-                text=text
-            )
-            created_annotations.append(annotation)
-
-        return created_annotations
+        """
+        This method is not used for creating annotations directly.
+        Annotation creation is handled in the view to maintain session_id consistency.
+        """
+        raise NotImplementedError(
+            "Use the submit_annotations view to create annotations from this serializer"
+        )
