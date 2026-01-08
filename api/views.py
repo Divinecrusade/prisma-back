@@ -135,7 +135,8 @@ class ResearchImageViewSet(viewsets.ModelViewSet):
     """
     ViewSet for ResearchImage.
     - retrieve: public (for review page, respects is_hidden)
-    - list/create/update/delete: admin only
+    - list/create/delete: admin only
+    - update/partial_update: DISABLED (to preserve research integrity)
     """
     queryset = ResearchImage.objects.all()
     serializer_class = ResearchImageSerializer
@@ -167,6 +168,28 @@ class ResearchImageViewSet(viewsets.ModelViewSet):
         
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        """
+        Disabled to preserve research integrity.
+        Once an image/question is created, it cannot be edited
+        because reviewers may have already answered the original question.
+        """
+        return Response(
+            {'error': 'Image editing is disabled to preserve research integrity'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        )
+
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Disabled to preserve research integrity.
+        Once an image/question is created, it cannot be edited
+        because reviewers may have already answered the original question.
+        """
+        return Response(
+            {'error': 'Image editing is disabled to preserve research integrity'},
+            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        )
 
     @action(detail=True, methods=['patch'])
     def visibility(self, request, pk=None):
