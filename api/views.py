@@ -342,6 +342,7 @@ def get_report_data(request, image_id):
         'question': image.question,
         'imageUrl': request.build_absolute_uri(image.image.url) if image.image else None,
         'projectName': image.project.name,
+        'projectId': str(image.project.id),
         'annotations': [
             {
                 'id': str(ann.id),
